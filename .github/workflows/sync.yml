@@ -1,11 +1,12 @@
 name: Sync to plugins-debug repo
 
-# Disabled until a separate plugins-debug repo exists. The debug build
-# MUST NOT publish to ordureconnoisseur/plugins — that repo serves the
-# public Refract source URL and adding refract-debug there would expose
-# it to every Refract user. Re-enable the `on:` trigger after creating
-# the plugins-debug repo and the PLUGINS_DEBUG_REPO_TOKEN secret.
+# Publishes the debug fork to ordureconnoisseur/plugins-debug, which
+# is the source URL for the debug channel. MUST NOT target
+# ordureconnoisseur/plugins — that one serves the public Refract source
+# URL and would expose the debug build to every Refract user.
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
 
 jobs:
