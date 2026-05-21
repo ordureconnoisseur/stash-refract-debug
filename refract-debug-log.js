@@ -2,42 +2,65 @@
    refract-debug diagnostic logger
    ───────────────────────────────────────────────────────────────────
    Loads alongside refract.js in the debug build. Captures evidence for
-   the "Save button stuck disabled after Apply" report:
+   the "Save button stuck disabled after Apply" report and exposes it
+   through both DevTools console (prefix `[refract-debug]`) AND a
+   floating on-screen panel — bottom-right pill button that opens a
+   log viewer with Copy-to-Clipboard and Download-as-.txt actions.
+   The reporter never needs to open DevTools.
 
-     • Every scrape-dialog open/close and its dialogClassName
-     • Every Apply click inside a .scrape-dialog
-     • Snapshot of every <input>/<select>/<textarea> value on the
-       enclosing performer edit form BEFORE and AFTER Apply, with
-       a diff so we can see which fields actually changed
-     • Save-button disabled state at +0ms, +200ms, +1000ms after Apply
-     • Save-button disabled-attribute MutationObserver — logs every
-       transition with timestamp
-     • Save click attempts: logs disabled=true/false and which button
+   What's captured:
      • Uncaught JS errors + unhandled promise rejections
-     • Manual one-shot dump: type `refractDebugDump()` in DevTools
-       console to print the current form/Save snapshot on demand
+     • Every scrape-dialog mount: dialog className, Apply state
+     • Every Apply click: pre/post snapshot of the underlying page
+       form (every input/select/textarea value), diffed at +1s so we
+       can see which fields actually changed
+     • Save-button disabled-attribute transitions (Mutation observer)
+     • Save-button state at +0/+200/+1000ms after Apply
+     • Save click attempts (success or "click on disabled" no-op)
 
-   Logs are prefixed `[refract-debug]` so the reporter can filter the
-   console and copy-paste the relevant block. No data leaves the
-   browser. Toggle off by removing refract-debug-log.js from
-   refract-debug.yml's javascript: list.
+   Key signal: if the post-Apply diff shows NO fields changed,
+   formik.dirty stays false and Save is supposed to be disabled —
+   the bug is the scraper, not Refract.
    ═══════════════════════════════════════════════════════════════════ */
 (function () {
     "use strict";
 
     var TAG = "[refract-debug]";
     var STYLE = "color:#a06cff;font-weight:600";
+    var MAX_BUFFER = 500;
+    var buffer = [];   /* { ts, level, parts } */
+    var panel = null;
+    var pillCount = null;
+    var logArea = null;
 
-    function log() {
-        var args = ["%c" + TAG, STYLE];
-        for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]); }
-        try { console.log.apply(console, args); } catch (e) {}
+    /* ── Logging primitive ──────────────────────────────────────────── */
+    function record(level, args) {
+        var parts = [];
+        for (var i = 0; i < args.length; i++) {
+            var a = args[i];
+            if (typeof a === "string" || typeof a === "number" || typeof a === "boolean") {
+                parts.push(String(a));
+            } else {
+                try { parts.push(JSON.stringify(a)); }
+                catch (e) { parts.push(String(a)); }
+            }
+        }
+        var entry = {
+            ts: new Date().toISOString(),
+            level: level,
+            text: parts.join(" ")
+        };
+        buffer.push(entry);
+        if (buffer.length > MAX_BUFFER) { buffer.splice(0, buffer.length - MAX_BUFFER); }
+        try {
+            var cs = ["%c" + TAG, STYLE];
+            for (var j = 0; j < args.length; j++) { cs.push(args[j]); }
+            (level === "warn" ? console.warn : console.log).apply(console, cs);
+        } catch (e) {}
+        refreshUi();
     }
-    function warn() {
-        var args = ["%c" + TAG, STYLE];
-        for (var i = 0; i < arguments.length; i++) { args.push(arguments[i]); }
-        try { console.warn.apply(console, args); } catch (e) {}
-    }
+    function log()  { record("log",  arguments); }
+    function warn() { record("warn", arguments); }
 
     /* ── Uncaught error capture ─────────────────────────────────────── */
     window.addEventListener("error", function (e) {
@@ -48,9 +71,6 @@
     });
 
     /* ── Form snapshot helpers ──────────────────────────────────────── */
-    /* Walk the nearest enclosing performer/scene/whatever edit form and
-       capture { name → value } for every named input/select/textarea.
-       Excludes hidden + disabled controls so noise stays low. */
     function snapshotForm(root) {
         if (!root) { return {}; }
         var out = {};
@@ -58,7 +78,6 @@
             if (el.type === "hidden") { return; }
             var key = el.name || el.id || el.getAttribute("data-rb-event-key") || null;
             if (!key) {
-                /* Try to derive from the .form-group label or [data-field] ancestor */
                 var fg = el.closest("[data-field], .form-group");
                 if (fg) {
                     key = fg.getAttribute("data-field") ||
@@ -67,15 +86,13 @@
                     if (key) { key = key.trim().slice(0, 40); }
                 }
             }
-            if (!key) { key = "(anon:" + (el.tagName.toLowerCase()) + ")"; }
+            if (!key) { key = "(anon:" + el.tagName.toLowerCase() + ")"; }
             var v;
             if (el.type === "checkbox") { v = el.checked; }
             else { v = el.value; }
             if (typeof v === "string" && v.length > 80) { v = v.slice(0, 77) + "..."; }
-            /* If a key appears twice (left/right column in scrape dialog),
-               disambiguate with a counter. */
-            var base = key, n = 1;
-            while (out.hasOwnProperty(key)) { n++; key = base + "#" + n; }
+            var base = key;
+            while (out.hasOwnProperty(key)) { key = base + "#" + (parseInt(key.split("#")[1] || "1", 10) + 1); }
             out[key] = v;
         });
         return out;
@@ -95,10 +112,6 @@
 
     /* ── Save button enumeration ────────────────────────────────────── */
     function findSaveButtons() {
-        /* Stash performer/scene/whatever edit panel renders Save as a
-           btn-success or btn-primary inside .details-edit (page-level)
-           OR inside .modal-footer (tagger create modal flow). Grab
-           every plausible candidate so we don't miss one. */
         var sel = [
             ".details-edit .btn-success",
             ".details-edit .btn-primary",
@@ -120,19 +133,17 @@
             log(label + " save[" + i + "]",
                 "disabled=" + b.disabled,
                 "text=" + JSON.stringify((b.textContent || "").trim().slice(0, 40)),
-                "inModal=" + inModal,
-                "class=" + JSON.stringify(b.className));
+                "inModal=" + inModal);
         });
     }
 
-    /* ── MutationObserver: track disabled attribute on Save buttons ── */
+    /* ── Disabled-attribute observer on Save buttons ────────────────── */
     var watchedSaves = new WeakSet();
     var saveAttrObserver = new MutationObserver(function (records) {
         records.forEach(function (r) {
             if (r.type === "attributes" && r.attributeName === "disabled") {
-                var btn = r.target;
-                log("Save disabled changed →", btn.disabled,
-                    "text=" + JSON.stringify((btn.textContent || "").trim().slice(0, 30)));
+                log("Save disabled changed →", r.target.disabled,
+                    "text=" + JSON.stringify((r.target.textContent || "").trim().slice(0, 30)));
             }
         });
     });
@@ -140,7 +151,7 @@
         findSaveButtons().forEach(function (b) {
             if (watchedSaves.has(b)) { return; }
             watchedSaves.add(b);
-            saveAttrObserver.observe(b, { attributes: true, attributeFilter: ["disabled", "class"] });
+            saveAttrObserver.observe(b, { attributes: true, attributeFilter: ["disabled"] });
         });
     }
 
@@ -150,8 +161,8 @@
         if (seenScrapeDialogs.has(modalContent)) { return; }
         seenScrapeDialogs.add(modalContent);
         var dlg = modalContent.closest(".modal-dialog");
-        var dlgClass = dlg ? dlg.className : "(no .modal-dialog)";
-        log("scrape dialog opened. dialogClassName=" + JSON.stringify(dlgClass));
+        log("scrape dialog opened. dialogClassName=" +
+            JSON.stringify(dlg ? dlg.className : "(no .modal-dialog)"));
         var apply = modalContent.querySelector(".modal-footer .btn.btn-primary");
         log("  apply btn text=" + JSON.stringify((apply && apply.textContent || "").trim()),
             "disabled=" + (apply ? apply.disabled : "(none)"));
@@ -159,7 +170,7 @@
 
     /* ── Click capture: Apply + Save ────────────────────────────────── */
     var pendingBefore = null;
-    document.body.addEventListener("click", function (e) {
+    document.body && document.body.addEventListener("click", function (e) {
         var btn = e.target.closest("button.btn");
         if (!btn) { return; }
         var text = (btn.textContent || "").trim().toLowerCase();
@@ -167,13 +178,8 @@
         var inScrapeDialog = scrapeModalContent &&
             scrapeModalContent.querySelector(":scope > .modal-body > .dialog-container");
 
-        /* Apply inside a scrape dialog → start the before/after snapshot
-           sequence. The "form" we want to snapshot is the page form
-           UNDERNEATH the modal, not the modal itself. */
         if (text === "apply" && inScrapeDialog) {
             log("Apply clicked in scrape dialog");
-            /* Page form lives outside the modal. Find #performer-edit /
-               #scene-edit / first <form id*="edit"> we can spot. */
             var pageForm = document.querySelector(
                 "form#performer-edit, form#scene-edit, form#studio-edit, " +
                 "form#movie-edit, form#gallery-edit, form#group-edit, " +
@@ -188,8 +194,6 @@
                 "fields=" + (pendingBefore.snapshot ? Object.keys(pendingBefore.snapshot).length : 0));
             snapshotSaveButtons("  pre-apply");
 
-            /* After Apply, the modal closes and React reconciles the
-               page form. Sample at 0/200/1000ms. */
             [0, 200, 1000].forEach(function (delay) {
                 setTimeout(function () {
                     attachSaveAttrObservers();
@@ -200,68 +204,210 @@
                         var changed = Object.keys(d);
                         if (!changed.length) {
                             warn("  no form fields changed after Apply — " +
-                                 "this explains why Save stays disabled (formik.dirty=false)");
+                                 "Save will stay disabled because formik.dirty=false");
                         } else {
                             log("  form fields changed:", changed.length);
                             changed.forEach(function (k) {
                                 log("    " + k + ":", JSON.stringify(d[k].before), "→", JSON.stringify(d[k].after));
                             });
                         }
+                        flashPill();
                         pendingBefore = null;
                     }
                 }, delay);
             });
         }
 
-        /* Save click attempt — log the disabled state at the moment of
-           click. If it's disabled, the click is a no-op but we want to
-           know that the user IS trying to click it. */
         if (text === "save" || text === "save & new") {
             log("Save click attempted. disabled=" + btn.disabled,
                 "inModal=" + !!btn.closest(".modal"),
                 "form=" + (btn.closest("form") ? btn.closest("form").id || "(no id)" : "(no form)"));
+            flashPill();
         }
     }, true);
 
-    /* ── DOM observer: detect scrape dialogs as they mount ──────────── */
-    var bodyObserver = new MutationObserver(function (records) {
-        records.forEach(function (r) {
-            r.addedNodes.forEach(function (n) {
-                if (n.nodeType !== 1) { return; }
-                /* React might mount the modal as the .modal node directly,
-                   or insert .modal-content somewhere inside. Cover both. */
-                var contents = [];
-                if (n.matches && n.matches(".modal-content")) { contents.push(n); }
-                if (n.querySelectorAll) {
-                    n.querySelectorAll(".modal-content").forEach(function (c) { contents.push(c); });
-                }
-                contents.forEach(function (c) {
-                    if (c.querySelector(":scope > .modal-body > .dialog-container")) {
-                        inspectScrapeDialog(c);
+    /* ── DOM observer: scrape dialogs as they mount ─────────────────── */
+    function startBodyObserver() {
+        var bodyObserver = new MutationObserver(function (records) {
+            records.forEach(function (r) {
+                r.addedNodes.forEach(function (n) {
+                    if (n.nodeType !== 1) { return; }
+                    var contents = [];
+                    if (n.matches && n.matches(".modal-content")) { contents.push(n); }
+                    if (n.querySelectorAll) {
+                        n.querySelectorAll(".modal-content").forEach(function (c) { contents.push(c); });
                     }
+                    contents.forEach(function (c) {
+                        if (c.querySelector(":scope > .modal-body > .dialog-container")) {
+                            inspectScrapeDialog(c);
+                        }
+                    });
+                    attachSaveAttrObservers();
                 });
-                /* Also attach Save-button observers when any edit form
-                   mounts/re-renders, so we catch disabled transitions
-                   that happen without an Apply click in between. */
-                attachSaveAttrObservers();
             });
         });
-    });
-    if (document.body) {
         bodyObserver.observe(document.body, { childList: true, subtree: true });
         attachSaveAttrObservers();
-    } else {
-        document.addEventListener("DOMContentLoaded", function () {
-            bodyObserver.observe(document.body, { childList: true, subtree: true });
-            attachSaveAttrObservers();
-        });
     }
 
-    /* ── Manual dump — for the reporter to run on demand ─────────────── */
+    /* ── Floating panel UI ──────────────────────────────────────────── */
+    function buildPanel() {
+        if (panel || !document.body) { return; }
+
+        /* Styles inline so the panel works regardless of theme. */
+        var style = document.createElement("style");
+        style.textContent = [
+            "#refract-debug-pill{position:fixed;bottom:14px;right:14px;z-index:99999;",
+            "  background:#1f1029;color:#d8c8ff;border:1px solid #6b3fbc;border-radius:999px;",
+            "  padding:6px 12px;font:600 12px/1 system-ui,sans-serif;cursor:pointer;",
+            "  box-shadow:0 4px 16px rgba(0,0,0,0.45),0 0 18px rgba(160,108,255,0.25);",
+            "  user-select:none;transition:transform 0.15s,box-shadow 0.15s;}",
+            "#refract-debug-pill:hover{transform:translateY(-1px);",
+            "  box-shadow:0 6px 22px rgba(0,0,0,0.55),0 0 24px rgba(160,108,255,0.4);}",
+            "#refract-debug-pill.flash{animation:rdb-flash 0.6s ease-out;}",
+            "@keyframes rdb-flash{0%{background:#a06cff;color:#fff;}100%{}}",
+            "#refract-debug-panel{position:fixed;bottom:50px;right:14px;z-index:99999;",
+            "  width:min(640px,calc(100vw - 28px));height:min(440px,60vh);display:none;",
+            "  flex-direction:column;background:#0f0a18;color:#e8e0ff;",
+            "  border:1px solid #6b3fbc;border-radius:8px;",
+            "  box-shadow:0 18px 50px rgba(0,0,0,0.65),0 0 28px rgba(160,108,255,0.18);",
+            "  font:12px/1.45 ui-monospace,SFMono-Regular,Menlo,monospace;overflow:hidden;}",
+            "#refract-debug-panel.open{display:flex;}",
+            "#refract-debug-panel header{display:flex;align-items:center;gap:8px;",
+            "  padding:8px 12px;background:#1a1029;border-bottom:1px solid #2a1c40;",
+            "  font:600 12px system-ui,sans-serif;}",
+            "#refract-debug-panel header .grow{flex:1;}",
+            "#refract-debug-panel button.act{background:#2a1c40;color:#e8e0ff;",
+            "  border:1px solid #4a2f7a;border-radius:5px;padding:4px 10px;font:600 11px system-ui,sans-serif;",
+            "  cursor:pointer;transition:background 0.12s,border-color 0.12s;}",
+            "#refract-debug-panel button.act:hover{background:#3a2858;border-color:#6b3fbc;}",
+            "#refract-debug-panel button.act.primary{background:#6b3fbc;border-color:#a06cff;color:#fff;}",
+            "#refract-debug-panel button.act.primary:hover{background:#7d4cd6;}",
+            "#refract-debug-panel textarea{flex:1;background:#0a0612;color:#d8c8ff;",
+            "  border:0;padding:10px 12px;resize:none;outline:none;",
+            "  font:11px/1.55 ui-monospace,SFMono-Regular,Menlo,monospace;white-space:pre;",
+            "  scrollbar-width:thin;scrollbar-color:#6b3fbc transparent;}",
+            "#refract-debug-panel .toast{background:#1a1029;border-top:1px solid #2a1c40;",
+            "  padding:6px 12px;font:11px system-ui,sans-serif;color:#a8a0c8;text-align:center;}"
+        ].join("\n");
+        document.head.appendChild(style);
+
+        var pill = document.createElement("div");
+        pill.id = "refract-debug-pill";
+        pill.title = "Refract debug — click to view captured logs";
+        pill.innerHTML = "Refract Debug · <span id=\"refract-debug-count\">0</span>";
+        document.body.appendChild(pill);
+        pillCount = pill.querySelector("#refract-debug-count");
+
+        panel = document.createElement("div");
+        panel.id = "refract-debug-panel";
+        panel.innerHTML = [
+            "<header>",
+            "  <span>Refract Debug — captured logs</span>",
+            "  <span class=\"grow\"></span>",
+            "  <button class=\"act\" data-action=\"clear\">Clear</button>",
+            "  <button class=\"act\" data-action=\"download\">Download .txt</button>",
+            "  <button class=\"act primary\" data-action=\"copy\">Copy to clipboard</button>",
+            "  <button class=\"act\" data-action=\"close\">×</button>",
+            "</header>",
+            "<textarea readonly spellcheck=\"false\"></textarea>",
+            "<div class=\"toast\">",
+            "  Reproduce the bug, then click <b>Copy to clipboard</b> and paste in your message. ",
+            "  Manual snapshot: type <code>refractDebugDump()</code> in DevTools.",
+            "</div>"
+        ].join("\n");
+        document.body.appendChild(panel);
+        logArea = panel.querySelector("textarea");
+
+        pill.addEventListener("click", function () {
+            panel.classList.toggle("open");
+            if (panel.classList.contains("open")) { refreshUi(); logArea.scrollTop = logArea.scrollHeight; }
+        });
+        panel.addEventListener("click", function (e) {
+            var b = e.target.closest("button[data-action]");
+            if (!b) { return; }
+            var act = b.getAttribute("data-action");
+            if (act === "close") { panel.classList.remove("open"); }
+            else if (act === "clear") { buffer.length = 0; refreshUi(); }
+            else if (act === "copy") { copyToClipboard(b); }
+            else if (act === "download") { downloadTxt(); }
+        });
+
+        refreshUi();
+    }
+    function refreshUi() {
+        if (pillCount) { pillCount.textContent = String(buffer.length); }
+        if (logArea && panel && panel.classList.contains("open")) {
+            var atBottom = logArea.scrollTop + logArea.clientHeight >= logArea.scrollHeight - 8;
+            logArea.value = serializeLogs();
+            if (atBottom) { logArea.scrollTop = logArea.scrollHeight; }
+        }
+    }
+    function flashPill() {
+        var p = document.getElementById("refract-debug-pill");
+        if (!p) { return; }
+        p.classList.remove("flash");
+        void p.offsetWidth;
+        p.classList.add("flash");
+    }
+    function serializeLogs() {
+        var head = [
+            "Refract Debug log — " + new Date().toISOString(),
+            "URL: " + location.pathname + location.search,
+            "UA: " + navigator.userAgent,
+            "Version: refract-debug 1.11.6-debug",
+            "Entries: " + buffer.length + " (capped at " + MAX_BUFFER + ")",
+            "────────────────────────────────────────────────────────────────"
+        ].join("\n");
+        var body = buffer.map(function (e) {
+            return e.ts + " " + (e.level === "warn" ? "WARN " : "     ") + e.text;
+        }).join("\n");
+        return head + "\n" + body + "\n";
+    }
+    function copyToClipboard(btn) {
+        var text = serializeLogs();
+        var ok = function () {
+            var prev = btn.textContent;
+            btn.textContent = "Copied ✓";
+            setTimeout(function () { btn.textContent = prev; }, 1600);
+        };
+        var fail = function (e) {
+            warn("Copy failed:", e && e.message);
+            /* Fallback: select textarea contents so the user can ctrl+c */
+            if (logArea) { logArea.focus(); logArea.select(); }
+            btn.textContent = "Select all + Ctrl+C";
+            setTimeout(function () { btn.textContent = "Copy to clipboard"; }, 3000);
+        };
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+            navigator.clipboard.writeText(text).then(ok, fail);
+        } else {
+            try {
+                logArea.value = text;
+                logArea.focus(); logArea.select();
+                document.execCommand("copy");
+                ok();
+            } catch (e) { fail(e); }
+        }
+    }
+    function downloadTxt() {
+        var text = serializeLogs();
+        var blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        var url = URL.createObjectURL(blob);
+        var a = document.createElement("a");
+        a.href = url;
+        a.download = "refract-debug-" + new Date().toISOString().replace(/[:.]/g, "-") + ".txt";
+        document.body.appendChild(a);
+        a.click();
+        setTimeout(function () {
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        }, 100);
+    }
+
+    /* ── Manual one-shot dump for DevTools power users ──────────────── */
     window.refractDebugDump = function () {
         log("=== manual dump ===");
         log("URL:", location.pathname + location.search);
-        log("Refract version: refract-debug 1.11.4-debug");
         snapshotSaveButtons("save state");
         var pageForm = document.querySelector("form[id$='-edit']");
         if (pageForm) {
@@ -273,14 +419,17 @@
         } else {
             log("no edit form found on this page");
         }
-        var scrapeOpen = document.querySelector(".modal-content:has(> .modal-body > .dialog-container)");
-        log("scrape dialog currently open:", !!scrapeOpen);
-        if (scrapeOpen) {
-            var dlg = scrapeOpen.closest(".modal-dialog");
-            log("  dialogClassName:", dlg ? dlg.className : "?");
-        }
+        var scrapeOpen = document.querySelector(".modal-content");
+        log("any modal currently open:", !!scrapeOpen);
         log("=== end dump ===");
     };
 
-    log("diagnostic logger active. Call refractDebugDump() for a manual snapshot.");
+    /* ── Boot ────────────────────────────────────────────────────────── */
+    function boot() {
+        startBodyObserver();
+        buildPanel();
+        log("diagnostic logger active. Click the bottom-right pill to view/copy/download logs.");
+    }
+    if (document.body) { boot(); }
+    else { document.addEventListener("DOMContentLoaded", boot); }
 })();

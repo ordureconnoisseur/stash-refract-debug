@@ -1,6 +1,6 @@
 name: Refract Theme (debug)
-description: Debug fork of Refract with a diagnostic logger that traces the scrape-dialog Apply flow and the Save-button disabled state. Open DevTools console after enabling — every log line is prefixed `[refract-debug]`. Install in place of Refract; disable Refract first.
-version: 1.11.5-debug
+description: Debug fork of Refract with a diagnostic logger that traces the scrape-dialog Apply flow and the Save-button disabled state. Shows a floating panel bottom-right with Copy and Download buttons — no DevTools required. Install in place of Refract; disable Refract first.
+version: 1.11.6-debug
 url: https://github.com/ordureconnoisseur/stash-refract-debug
 ui:
   assets:
