@@ -1,12 +1,13 @@
 name: Refract Theme (debug)
-description: Debug fork of Refract with the v1.11.0 scrape-results modal restyle stripped — install in place of Refract to diagnose scrape-modal regressions. Disable Refract first.
-version: 1.11.4-debug
+description: Debug fork of Refract with a diagnostic logger that traces the scrape-dialog Apply flow and the Save-button disabled state. Open DevTools console after enabling — every log line is prefixed `[refract-debug]`. Install in place of Refract; disable Refract first.
+version: 1.11.5-debug
 url: https://github.com/ordureconnoisseur/stash-refract-debug
 ui:
   assets:
     /: .
   javascript:
     - refract.js
+    - refract-debug-log.js
   css:
     - css/01_tokens.css
     - css/02_navbar.css
