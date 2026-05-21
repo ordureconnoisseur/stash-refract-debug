@@ -1,0 +1,37 @@
+name: Sync to plugins-debug repo
+
+# Disabled until a separate plugins-debug repo exists. The debug build
+# MUST NOT publish to ordureconnoisseur/plugins — that repo serves the
+# public Refract source URL and adding refract-debug there would expose
+# it to every Refract user. Re-enable the `on:` trigger after creating
+# the plugins-debug repo and the PLUGINS_DEBUG_REPO_TOKEN secret.
+on:
+  workflow_dispatch:
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Clone plugins-debug repo
+        run: |
+          git clone https://x-access-token:${{ secrets.PLUGINS_DEBUG_REPO_TOKEN }}@github.com/ordureconnoisseur/plugins-debug.git plugins-repo
+
+      - name: Copy files
+        run: |
+          mkdir -p plugins-repo/plugins/refract-debug
+          cp -r * plugins-repo/plugins/refract-debug/ 2>/dev/null || true
+          rm -rf plugins-repo/plugins/refract-debug/.github
+          rm -rf plugins-repo/plugins/refract-debug/plugins-repo
+          rm -rf plugins-repo/plugins/refract-debug/screenshots
+
+      - name: Commit and push
+        run: |
+          cd plugins-repo
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add plugins/refract-debug/
+          git diff --cached --quiet && echo "No changes" && exit 0
+          git commit -m "sync: refract-debug $(git -C .. rev-parse --short HEAD)"
+          git push
